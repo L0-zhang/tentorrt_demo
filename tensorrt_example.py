@@ -15,8 +15,6 @@ import common
 import torchvision.transforms as transforms
 
 TRT_LOGGER = trt.Logger()
-os.environ["CUDA_VISIBLE_DEVICES"] = '0'  # 指定0号GPU可用
-
 
 # mean and std of cifar100 dataset
 CIFAR100_TRAIN_MEAN = (
@@ -27,22 +25,10 @@ CIFAR100_TRAIN_STD = (0.2673342858792401,
 
 
 def get_test_dataloader(mean, std, batch_size=16, num_workers=2, shuffle=True):
-    """ return training dataloader
-    Args:
-        mean: mean of cifar100 test dataset
-        std: std of cifar100 test dataset
-        path: path to cifar100 test python dataset
-        batch_size: dataloader batchsize
-        num_workers: dataloader num_works
-        shuffle: whether to shuffle
-    Returns: cifar100_test_loader:torch dataloader object
-    """
-
     transform_test = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(mean, std)
     ])
-    #cifar100_test = CIFAR100Test(path, transform=transform_test)
     cifar100_test = torchvision.datasets.CIFAR100(
         root='./data', train=False, download=True, transform=transform_test)
     cifar100_test_loader = DataLoader(
@@ -52,15 +38,10 @@ def get_test_dataloader(mean, std, batch_size=16, num_workers=2, shuffle=True):
 
 
 def ONNX_build_engine(onnx_file_path, trt_file):
-    # 通过加载onnx文件，构建engine
-    # :param onnx_file_path: onnx文件路径
-    # :return: engine
-    # 这里是创建日志记录器
     G_LOGGER = trt.Logger(trt.Logger.WARNING)
-    # 动态输入是使用onnx模型时必须要写的：
     explicit_batch = 1 << (int)(
         trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    batch_size = 64  # trt推理时最大支持的batchsize
+    batch_size = 64  
     with trt.Builder(G_LOGGER) as builder, builder.create_network(explicit_batch) as network, \
             trt.OnnxParser(network, G_LOGGER) as parser:
         builder.max_batch_size = batch_size
@@ -82,7 +63,6 @@ def ONNX_build_engine(onnx_file_path, trt_file):
         config.add_optimization_profile(profile)
         engine = builder.build_serialized_network(network, config)
         print("Completed creating Engine")
-        # 保存engine文件
         with open(trt_file, "wb") as f:
             f.write(engine)
         return engine
@@ -109,6 +89,7 @@ if __name__ == '__main__':
 
     device = "cuda" if args.gpu else "cpu"
     net = models.resnet101(pretrained=True)
+    net.fc=torch.nn.Linear(in_features=2048, out_features=100, bias=True)
     net = net.to(device)
     # # print(net)
     net.eval()
@@ -123,7 +104,7 @@ if __name__ == '__main__':
 #%% save onnx 
     input = torch.rand([1, 3, 32, 32]).to(device)
     onnx_file = "resnet101.onnx"
-#%%
+
     if  os.path.exists(onnx_file):
         os.remove(onnx_file)
     torch.onnx.export(net, input, onnx_file,
@@ -153,7 +134,6 @@ if __name__ == '__main__':
     context.set_binding_shape(0, (16, 3, 32, 32))
 
     inputs, outputs, bindings, stream = common.allocate_buffers(engine, 32)
-    # input, output: host # bindings
 
 
 # %%inference
@@ -161,17 +141,14 @@ if __name__ == '__main__':
     label_ls = []
     pred_ls = []
     for n_iter, (image, label) in enumerate(cifar100_test_loader):
-        # print("iteration: {}\ttotal {} iterations".format(n_iter + 1, len(cifar100_test_loader)))
-        # print(image)
+
         inputs[0].host = image.numpy()
 
         trt_outputs = common.do_inference(
             context, bindings=bindings, inputs=inputs, outputs=outputs, stream=stream, batch_size=32)
         label_ls.extend(label.numpy())
         pred_ls.extend(np.array(trt_outputs[0]).reshape(
-            [-1, 100]).argmax(1).tolist())
-        break
-        # print((np.array(pred_ls)[:10000]==np.array(label_ls)[:10000]).sum())
+            [-1, 1000]).argmax(1).tolist())
     t2 = time.time()
     print(t2-t1)
 
@@ -189,7 +166,7 @@ if __name__ == '__main__':
     for n_iter, (image, label) in enumerate(cifar100_test_loader):
 
         output_trt = model_trt(image.to(device))
-        break
 
     t2 = time.time()
     print(t2-t1)
+
